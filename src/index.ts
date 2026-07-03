@@ -251,6 +251,10 @@ function startAuthServer(): Promise<{ port: number; state: string }> {
           "Access-Control-Allow-Origin": origin,
           "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
           "Access-Control-Allow-Headers": "content-type",
+          // Chrome Private Network Access: public https sayfadan loopback'e
+          // fetch, preflight'ta bu başlığı ister — yoksa POST yolu bloklanıp
+          // GET fallback'ine düşer (token URL'e girer). Origin zaten allowlist'li.
+          "Access-Control-Allow-Private-Network": "true",
           Vary: "Origin",
         }
       : {};

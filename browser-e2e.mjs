@@ -51,10 +51,15 @@ await page.goto(start.auth_url, { waitUntil: "networkidle" });
 await page.waitForSelector(`text=${EMAIL}`, { timeout: 20000 });
 console.log("CONSENT-PAGE ok (email görünür)");
 
-// 4) "Connect account" tıkla
+// 4) "Connect account" tıkla — iki başarı yolu var:
+//    (a) fetch POST çalışır → sayfa "Connected" gösterir
+//    (b) PNA/mixed-content fetch'i engellerse GET fallback → 127.0.0.1'e navigasyon
 await page.click('button:has-text("Connect account")');
-await page.waitForSelector('text=Connected', { timeout: 15000 });
-console.log("APPROVED — sayfa 'Connected' gösterdi");
+const outcome = await Promise.race([
+  page.waitForSelector("text=Connected", { timeout: 15000 }).then(() => "post"),
+  page.waitForURL(/127\.0\.0\.1/, { timeout: 15000 }).then(() => "get-fallback"),
+]);
+console.log("APPROVED — yol:", outcome);
 await browser.close();
 
 // 5) MCP tarafı: bağlantı gerçekleşti mi + GERÇEK token'la API çalışıyor mu

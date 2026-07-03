@@ -1,6 +1,6 @@
 {
   "name": "humanaizer-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Humanaizer MCP server — end-to-end AI content generation (login, plan/quota, autopilot pipeline, publish) from Claude.",
   "license": "MIT",
   "repository": {
