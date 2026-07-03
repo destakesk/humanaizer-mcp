@@ -22,10 +22,37 @@ import * as path from "node:path";
 // ---------------------------------------------------------------------------
 // Config — all public values; overridable via env.
 // ---------------------------------------------------------------------------
-const API_URL = (process.env.HUMANAIZER_API_URL ?? "https://api.humanaizer.io").replace(/\/$/, "");
-const SUPABASE_URL = (
-  process.env.HUMANAIZER_SUPABASE_URL ?? "https://zmdbafqjtqlenleocukz.supabase.co"
-).replace(/\/$/, "");
+
+/**
+ * Güvenlik: JWT taşıyan her istek TLS üzerinden gitmek zorunda. Env ile
+ * override edilen URL http ise (localhost hariç) server hiç başlamaz —
+ * token'ı düz metin gönderen bir yanlış yapılandırmayı sessizce kabul etmeyiz.
+ */
+function assertSecureUrl(name: string, raw: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`${name} geçerli bir URL değil: ${raw}`);
+  }
+  const isLocal = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1";
+  if (u.protocol !== "https:" && !isLocal) {
+    throw new Error(`${name} https:// olmalı (JWT düz metin gönderilemez): ${raw}`);
+  }
+  return raw.replace(/\/$/, "");
+}
+
+const API_URL = assertSecureUrl(
+  "HUMANAIZER_API_URL",
+  process.env.HUMANAIZER_API_URL ?? "https://api.humanaizer.io",
+);
+const SUPABASE_URL = assertSecureUrl(
+  "HUMANAIZER_SUPABASE_URL",
+  process.env.HUMANAIZER_SUPABASE_URL ?? "https://zmdbafqjtqlenleocukz.supabase.co",
+);
+
+/** Ağ istekleri asılı kalmasın — tek tool çağrısı en çok 60 sn bekler. */
+const FETCH_TIMEOUT_MS = 60_000;
 // Supabase anon (publishable) key — shipped in the humanaizer.io web bundle;
 // not a secret. Row access is enforced server-side by RLS + the API.
 const SUPABASE_ANON_KEY =
@@ -66,7 +93,7 @@ function saveSession(s: Session | null): void {
       fs.rmSync(SESSION_FILE, { force: true });
       return;
     }
-    fs.mkdirSync(SESSION_DIR, { recursive: true });
+    fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
     fs.writeFileSync(SESSION_FILE, JSON.stringify(s, null, 2), { mode: 0o600 });
   } catch {
     /* persistence is best-effort; in-memory session still works */
@@ -78,6 +105,7 @@ async function supabaseAuth(body: Record<string, string>, grant: string): Promis
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!resp.ok) {
@@ -97,6 +125,21 @@ async function supabaseAuth(body: Record<string, string>, grant: string): Promis
   };
 }
 
+async function refreshSession(current: Session): Promise<Session> {
+  try {
+    const refreshed = await supabaseAuth({ refresh_token: current.refresh_token }, "refresh_token");
+    refreshed.email = refreshed.email ?? current.email;
+    saveSession(refreshed);
+    return refreshed;
+  } catch {
+    // Refresh token iptal edilmiş/geçersiz — ölü oturumu diskte BIRAKMA.
+    saveSession(null);
+    throw new Error(
+      "Oturum süresi doldu veya iptal edildi. `login` tool'u ile tekrar giriş yap.",
+    );
+  }
+}
+
 async function ensureFreshToken(): Promise<Session> {
   if (!session) {
     throw new Error(
@@ -105,10 +148,7 @@ async function ensureFreshToken(): Promise<Session> {
   }
   const now = Math.floor(Date.now() / 1000);
   if (session.expires_at - now > 60) return session;
-  const refreshed = await supabaseAuth({ refresh_token: session.refresh_token }, "refresh_token");
-  refreshed.email = refreshed.email ?? session.email;
-  saveSession(refreshed);
-  return refreshed;
+  return refreshSession(session);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,13 +168,12 @@ async function api<T = unknown>(
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
   if (resp.status === 401 && !retried) {
     // Token revoked/expired server-side — force refresh and retry once.
-    const refreshed = await supabaseAuth({ refresh_token: s.refresh_token }, "refresh_token");
-    refreshed.email = refreshed.email ?? s.email;
-    saveSession(refreshed);
+    await refreshSession(s);
     return api<T>(method, apiPath, body, true);
   }
 
@@ -205,7 +244,9 @@ server.registerTool(
     title: "Humanaizer hesabına giriş",
     description:
       "Humanaizer (humanaizer.io) hesabına email + şifre ile giriş yapar ve oturumu kaydeder. " +
-      "Diğer tüm tool'lar bu oturumu kullanır. Girişten sonra plan/kota özeti döner.",
+      "Diğer tüm tool'lar bu oturumu kullanır. Girişten sonra plan/kota özeti döner. " +
+      "Şifre yalnızca Supabase auth'a TLS üzerinden iletilir; diske şifre değil, " +
+      "kısa ömürlü oturum token'ları yazılır (~/.humanaizer, 0600).",
     inputSchema: { email: z.string().email(), password: z.string().min(1) },
   },
   async ({ email, password }) => {
@@ -634,7 +675,8 @@ server.registerTool(
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`humanaizer-mcp ready (api=${API_URL}, session=${session ? session.email ?? "yes" : "none"})`);
+  // PII loglama: e-posta dahil kimlik bilgisi stderr'e yazılmaz.
+  console.error(`humanaizer-mcp ready (api=${API_URL}, session=${session ? "restored" : "none"})`);
 }
 
 main().catch((err) => {
