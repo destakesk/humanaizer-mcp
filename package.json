@@ -1,0 +1,47 @@
+{
+  "name": "humanaizer-mcp",
+  "version": "0.1.2",
+  "description": "Humanaizer MCP server — end-to-end AI content generation (login, plan/quota, autopilot pipeline, publish) from Claude.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/destakesk/humanaizer-mcp.git"
+  },
+  "homepage": "https://github.com/destakesk/humanaizer-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/destakesk/humanaizer-mcp/issues"
+  },
+  "type": "module",
+  "bin": {
+    "humanaizer-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "skill",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "humanaizer",
+    "ai-content",
+    "seo",
+    "claude"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
