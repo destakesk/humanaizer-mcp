@@ -19,10 +19,15 @@ claude mcp add humanaizer -- npx -y humanaizer-mcp
 
 ## 1. Oturum
 
-- Önce `get_account` dene. "Oturum yok" hatası dönerse kullanıcıdan **e-posta + şifre**
-  iste ve `login` çağır. Oturum diske kaydedilir ve otomatik yenilenir — her seferinde
-  giriş isteme.
-- Login başarısızsa hatayı aynen aktar (yanlış şifre / hesap yok). Şifreyi asla tekrarlama.
+- Önce `get_account` dene. "Oturum yok" hatası dönerse **`login_browser` kullan
+  (önerilen)**: tarayıcıda humanaizer.io onay sayfası açılır, kullanıcı tek tıkla
+  hesabını bağlar — şifre sohbete hiç girmez. Çağrı hemen döner; kullanıcıya
+  "tarayıcıda onayla" de, onayladığını söyleyince `login_status` ile doğrula
+  (bekleme 5 dk sonra otomatik iptal olur; gerekirse `login_browser`'ı yeniden çağır).
+- Tarayıcı açılamayan ortamda (SSH/headless) yedek: kullanıcıdan e-posta + şifre
+  isteyip `login` çağır. Şifreyi asla tekrarlama/loglama.
+- Oturum diske kaydedilir ve otomatik yenilenir — her seferinde giriş isteme.
+- Başarısızsa hatayı aynen aktar (yanlış şifre / hesap yok / onay reddedildi).
 
 ## 2. Plan kontrolü (üretime başlamadan ÖNCE)
 
@@ -93,7 +98,9 @@ Pipeline dakikalar sürer (tipik 5–15 dk). `get_content_status` ile izle:
 | `duplicate_job` (409) | Aynı içerik zaten yayın kuyruğunda → `list_publish_jobs` ile mevcut job'u izle |
 | `not_ready` | İçerik `ready_to_publish` değil → önce pipeline'ı bitir |
 | `integration_inactive` | Entegrasyon pasif/yenileme bekliyor → panelden yenile |
-| "Oturum yok" | `login` gerekli |
+| "Oturum yok" | `login_browser` (önerilen) veya `login` gerekli |
+| `login_status` = expired | 5 dk onay penceresi kapandı → `login_browser`'ı yeniden çağır |
+| `login_status` = denied | Kullanıcı tarayıcıda reddetti → istemeden olduysa yeniden başlat |
 
 ## İlkeler
 

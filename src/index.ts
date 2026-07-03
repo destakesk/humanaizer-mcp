@@ -15,7 +15,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -53,6 +56,12 @@ const SUPABASE_URL = assertSecureUrl(
 
 /** Ağ istekleri asılı kalmasın — tek tool çağrısı en çok 60 sn bekler. */
 const FETCH_TIMEOUT_MS = 60_000;
+
+/** Tarayıcı yetkilendirme onay sayfasının yaşadığı frontend. */
+const APP_URL = assertSecureUrl(
+  "HUMANAIZER_APP_URL",
+  process.env.HUMANAIZER_APP_URL ?? "https://humanaizer.io",
+);
 // Supabase anon (publishable) key — shipped in the humanaizer.io web bundle;
 // not a secret. Row access is enforced server-side by RLS + the API.
 const SUPABASE_ANON_KEY =
@@ -149,6 +158,174 @@ async function ensureFreshToken(): Promise<Session> {
   const now = Math.floor(Date.now() / 1000);
   if (session.expires_at - now > 60) return session;
   return refreshSession(session);
+}
+
+// ---------------------------------------------------------------------------
+// Tarayıcı yetkilendirme (login_browser) — RFC 8252 loopback modeli
+// ---------------------------------------------------------------------------
+// `login_browser` 127.0.0.1'de tek seferlik bir callback dinleyicisi açar ve
+// tarayıcıda ${APP_URL}/account/mcp-auth?port&state onay sayfasını başlatır.
+// Sayfa (kullanıcı TIKLAYINCA) Supabase oturum token'larını buraya POST'lar.
+// Güvenlik: state nonce (timing-safe karşılaştırma), yalnız loopback bind,
+// 5 dk sonra otomatik kapanma, allowlist'li CORS, 64KB gövde sınırı.
+
+const BROWSER_AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTH_BODY_LIMIT = 64 * 1024;
+const ALLOWED_ORIGINS = new Set(
+  [
+    "https://humanaizer.io",
+    "https://www.humanaizer.io",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    APP_URL,
+  ].map((o) => o.replace(/\/$/, "")),
+);
+
+type PendingAuth = {
+  server: http.Server;
+  state: string;
+  timer: NodeJS.Timeout;
+  result: "pending" | "connected" | "denied" | "expired";
+};
+
+let pendingAuth: PendingAuth | null = null;
+
+function closePendingAuth(finalResult?: PendingAuth["result"]): void {
+  if (!pendingAuth) return;
+  if (finalResult) pendingAuth.result = finalResult;
+  clearTimeout(pendingAuth.timer);
+  try {
+    pendingAuth.server.close();
+  } catch {
+    /* already closed */
+  }
+}
+
+function statesMatch(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+/** Payload'u doğrula + oturumu kaydet. Dönüş: kullanıcıya gösterilecek sonuç. */
+function consumeAuthPayload(payload: Record<string, unknown>): { status: number; body: string } {
+  if (!pendingAuth || pendingAuth.result !== "pending") {
+    return { status: 410, body: JSON.stringify({ error: "no pending authorization" }) };
+  }
+  if (typeof payload.state !== "string" || !statesMatch(payload.state, pendingAuth.state)) {
+    return { status: 403, body: JSON.stringify({ error: "state mismatch" }) };
+  }
+  if (payload.error === "denied") {
+    closePendingAuth("denied");
+    return { status: 200, body: JSON.stringify({ ok: true, result: "denied" }) };
+  }
+  const access = payload.access_token;
+  const refresh = payload.refresh_token;
+  if (typeof access !== "string" || !access || typeof refresh !== "string" || !refresh) {
+    return { status: 400, body: JSON.stringify({ error: "missing tokens" }) };
+  }
+  const expiresAt = Number(payload.expires_at);
+  saveSession({
+    access_token: access,
+    refresh_token: refresh,
+    expires_at: Number.isFinite(expiresAt) && expiresAt > 0
+      ? Math.floor(expiresAt)
+      : Math.floor(Date.now() / 1000) + 3600,
+    email: typeof payload.email === "string" && payload.email ? payload.email : undefined,
+  });
+  closePendingAuth("connected");
+  return { status: 200, body: JSON.stringify({ ok: true, result: "connected" }) };
+}
+
+const AUTH_DONE_HTML = (title: string, body: string) =>
+  `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;height:90vh;color:#1a1d24"><div style="text-align:center"><h2>${title}</h2><p>${body}</p></div></body>`;
+
+function startAuthServer(): Promise<{ port: number; state: string }> {
+  closePendingAuth("expired");
+  const state = randomBytes(24).toString("base64url");
+
+  const server = http.createServer((req, res) => {
+    const origin = String(req.headers.origin ?? "").replace(/\/$/, "");
+    const corsHeaders: Record<string, string> = ALLOWED_ORIGINS.has(origin)
+      ? {
+          "Access-Control-Allow-Origin": origin,
+          "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+          "Access-Control-Allow-Headers": "content-type",
+          Vary: "Origin",
+        }
+      : {};
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname !== "/callback") {
+      res.writeHead(404, corsHeaders);
+      return res.end();
+    }
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, corsHeaders);
+      return res.end();
+    }
+    if (req.method === "POST") {
+      let raw = "";
+      req.on("data", (chunk) => {
+        raw += chunk;
+        if (raw.length > AUTH_BODY_LIMIT) req.destroy();
+      });
+      req.on("end", () => {
+        let payload: Record<string, unknown> = {};
+        try {
+          payload = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          /* boş bırak — consume 400 döner */
+        }
+        const out = consumeAuthPayload(payload);
+        res.writeHead(out.status, { "Content-Type": "application/json", ...corsHeaders });
+        res.end(out.body);
+      });
+      return;
+    }
+    if (req.method === "GET") {
+      // Safari fallback'i — top-level navigasyonla gelen query paramları.
+      const payload = Object.fromEntries(url.searchParams.entries()) as Record<string, unknown>;
+      const out = consumeAuthPayload(payload);
+      const okBody =
+        out.status === 200 && out.body.includes("connected")
+          ? AUTH_DONE_HTML("Bağlandı ✓", "Bu sekmeyi kapatıp Claude'a dönebilirsin.")
+          : out.status === 200
+            ? AUTH_DONE_HTML("İstek reddedildi", "Erişim verilmedi. Bu sekmeyi kapatabilirsin.")
+            : AUTH_DONE_HTML("Yetkilendirme başarısız", "Bağlantıyı Claude'dan yeniden başlat.");
+      res.writeHead(out.status, { "Content-Type": "text/html; charset=utf-8", ...corsHeaders });
+      return res.end(okBody);
+    }
+    res.writeHead(405, corsHeaders);
+    res.end();
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") return reject(new Error("listen failed"));
+      const timer = setTimeout(() => closePendingAuth("expired"), BROWSER_AUTH_TIMEOUT_MS);
+      timer.unref();
+      pendingAuth = { server, state, timer, result: "pending" };
+      resolve({ port: addr.port, state });
+    });
+  });
+}
+
+function openInBrowser(url: string): boolean {
+  try {
+    const [cmd, args] =
+      process.platform === "darwin"
+        ? ["open", [url]]
+        : process.platform === "win32"
+          ? ["cmd", ["/c", "start", "", url]]
+          : ["xdg-open", [url]];
+    const child = spawn(cmd, args as string[], { stdio: "ignore", detached: true });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +441,65 @@ server.registerTool(
     } catch (e) {
       return fail(e);
     }
+  },
+);
+
+server.registerTool(
+  "login_browser",
+  {
+    title: "Tarayıcıdan hesap bağla (önerilen)",
+    description:
+      "Şifre istemeden tarayıcı üzerinden hesap bağlar: humanaizer.io onay sayfası açılır, " +
+      "kullanıcı tek tıkla izin verir. Çağrı hemen döner; kullanıcı tarayıcıda onayladıktan " +
+      "sonra `login_status` (veya doğrudan `get_account`) ile bağlantıyı doğrula. " +
+      "Bekleme 5 dakika sonra otomatik iptal olur.",
+    inputSchema: {
+      open_browser: z
+        .boolean()
+        .default(true)
+        .describe("false → tarayıcı otomatik açılmaz, sadece URL döner"),
+    },
+  },
+  async ({ open_browser }) => {
+    try {
+      const { port, state } = await startAuthServer();
+      const authUrl = `${APP_URL}/account/mcp-auth?port=${port}&state=${state}`;
+      const opened = open_browser ? openInBrowser(authUrl) : false;
+      return ok({
+        auth_url: authUrl,
+        browser_opened: opened,
+        expires_in_seconds: BROWSER_AUTH_TIMEOUT_MS / 1000,
+        message:
+          (opened
+            ? "Tarayıcıda Humanaizer onay sayfası açıldı."
+            : "Şu bağlantıyı tarayıcında aç: " + authUrl) +
+          " Kullanıcı 'Hesabı bağla'ya tıkladıktan sonra `login_status` ile doğrula.",
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.registerTool(
+  "login_status",
+  {
+    title: "Bağlantı durumu",
+    description:
+      "Tarayıcı yetkilendirmesinin sonucunu ve mevcut oturumu döner " +
+      "(pending/connected/denied/expired + oturum var mı).",
+    inputSchema: {},
+  },
+  async () => {
+    return ok({
+      browser_auth: pendingAuth?.result ?? "none",
+      session: session ? { email: session.email ?? null, active: true } : { active: false },
+      hint: session
+        ? "Oturum hazır — get_account ile plan/kota alınabilir."
+        : pendingAuth?.result === "pending"
+          ? "Kullanıcının tarayıcıda onaylaması bekleniyor."
+          : "Oturum yok — login_browser veya login ile giriş yap.",
+    });
   },
 );
 

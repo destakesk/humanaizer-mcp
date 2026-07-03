@@ -41,7 +41,7 @@ cp "$(npm root -g)/humanaizer-mcp/skill/humanaizer/SKILL.md" ~/.claude/skills/hu
 
 ## Usage
 
-1. **Login once** — ask Claude: *"Humanaizer hesabıma giriş yap"* (email + password). The session is stored at `~/.humanaizer/mcp-session.json` (0600) and auto-refreshes.
+1. **Connect once** — ask Claude: *"Humanaizer hesabımı bağla"*. The `login_browser` tool opens a consent page on humanaizer.io in your browser; approve with one click (no password ever enters the chat). Password login (`login`) remains available as a fallback for headless environments. The session is stored at `~/.humanaizer/mcp-session.json` (0600) and auto-refreshes.
 2. **Check your plan** — `get_account` shows subscription, usage and limits. All quota enforcement happens server-side.
 3. **Create content** — Claude picks a brand kit, content type and template, fills the required fields and calls `create_content`. Autopilot runs the whole pipeline; progress is polled with `get_content_status`.
 4. **Publish** — when the content reaches `ready_to_publish`, `publish_content` sends it to a connected integration; `list_publish_jobs` returns the live permalink.
@@ -50,7 +50,8 @@ cp "$(npm root -g)/humanaizer-mcp/skill/humanaizer/SKILL.md" ~/.claude/skills/hu
 
 | Tool | Purpose |
 | --- | --- |
-| `login` / `logout` | Email+password session (Supabase JWT, auto-refresh) |
+| `login_browser` / `login_status` | Browser-based account connect (one-click consent on humanaizer.io, RFC 8252 loopback; state nonce, 5-min window) |
+| `login` / `logout` | Email+password fallback (Supabase JWT, auto-refresh) |
 | `get_account` | Plan, usage, limits, features |
 | `list_brand_kits` | Brand kits |
 | `list_content_types` / `get_content_type_schema` | Content types + required `field_values` schema |
@@ -70,6 +71,7 @@ cp "$(npm root -g)/humanaizer-mcp/skill/humanaizer/SKILL.md" ~/.claude/skills/hu
 | `HUMANAIZER_API_URL` | `https://api.humanaizer.io` |
 | `HUMANAIZER_SUPABASE_URL` | production project |
 | `HUMANAIZER_SUPABASE_ANON_KEY` | production publishable key |
+| `HUMANAIZER_APP_URL` | `https://humanaizer.io` (browser consent page) |
 
 ## Requirements
 
