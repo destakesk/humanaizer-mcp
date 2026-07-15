@@ -78,6 +78,13 @@ cp "$(npm root -g)/humanaizer-mcp/skill/humanaizer/SKILL.md" ~/.claude/skills/hu
 - Node.js ≥ 18
 - A [humanaizer.io](https://humanaizer.io) account (free plan works; publishing requires a plan with `auto_publish`)
 
+## Links
+
+- [humanaizer.io](https://humanaizer.io) — AI content generation & humanizer platform
+- [Free AI Humanizer](https://humanaizer.io/tools/ai-humanizer) — make AI text read naturally (no sign-up to try)
+- [Pricing & plans](https://humanaizer.io/pricing)
+- [Blog](https://humanaizer.io/blog) — guides on writing natural, high-quality AI content
+
 ## License
 
 MIT
