@@ -51,7 +51,7 @@ const API_URL = assertSecureUrl(
 );
 const SUPABASE_URL = assertSecureUrl(
   "HUMANAIZER_SUPABASE_URL",
-  process.env.HUMANAIZER_SUPABASE_URL ?? "https://zmdbafqjtqlenleocukz.supabase.co",
+  process.env.HUMANAIZER_SUPABASE_URL ?? "https://sb.humanaizer.io",
 );
 
 /** Ağ istekleri asılı kalmasın — tek tool çağrısı en çok 60 sn bekler. */
